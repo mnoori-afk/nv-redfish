@@ -505,8 +505,18 @@ impl Redfish for Bmc {
             let bios = self.s.bios().await?;
             let url = format!("Systems/{}/Bios", self.s.system_id());
             let attrs = jsonmap::get_object(&bios, "Attributes", &url)?;
-            let kcsacp = jsonmap::get_str(attrs, "KCSACP", "Bios Attributes")?;
-            let usb000 = jsonmap::get_str(attrs, "USB000", "Bios Attributes")?;
+            // Some AMI boards (e.g. GB300 Lenovo trays) don't expose the KCSACP/USB000
+            // BIOS lockdown attributes at all. Treat their absence as "lockdown not
+            // supported" so machine_setup proceeds (the caller handles NotSupported),
+            // instead of propagating a hard "Missing key" error that blocks HostInit.
+            let (Ok(kcsacp), Ok(usb000)) = (
+                jsonmap::get_str(attrs, "KCSACP", "Bios Attributes"),
+                jsonmap::get_str(attrs, "USB000", "Bios Attributes"),
+            ) else {
+                return Err(RedfishError::NotSupported(
+                    "BMC does not expose KCSACP/USB000 lockdown BIOS attributes".to_string(),
+                ));
+            };
 
             let hi_url = "Managers/Self/HostInterfaces/Self";
             let (_status, hi): (_, serde_json::Value) = self.s.client.get(hi_url).await?;
