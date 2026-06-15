@@ -93,6 +93,9 @@ impl Config {
         if quirks.bug_missing_chassis_name_field() {
             patches.push(add_default_chassis_name);
         }
+        if quirks.bug_missing_chassis_id_field() {
+            patches.push(add_default_chassis_id);
+        }
         if quirks.bug_empty_uuid_field() {
             patches.push(normalize_empty_uuid_field);
         }
@@ -437,6 +440,26 @@ fn add_default_chassis_name(v: JsonValue) -> JsonValue {
     if let JsonValue::Object(mut obj) = v {
         obj.entry("Name")
             .or_insert(JsonValue::String("Unnamed chassis".into()));
+        JsonValue::Object(obj)
+    } else {
+        v
+    }
+}
+
+fn add_default_chassis_id(v: JsonValue) -> JsonValue {
+    if let JsonValue::Object(mut obj) = v {
+        if !obj.contains_key("Id") {
+            // Derive a stable, unique Id from the trailing segment of @odata.id
+            // (e.g. ".../Chassis/HGX_GPU_0" -> "HGX_GPU_0"); fall back if absent.
+            let id = obj
+                .get("@odata.id")
+                .and_then(JsonValue::as_str)
+                .and_then(|s| s.trim_end_matches('/').rsplit('/').next())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Unknown")
+                .to_string();
+            obj.insert("Id".to_string(), JsonValue::String(id));
+        }
         JsonValue::Object(obj)
     } else {
         v

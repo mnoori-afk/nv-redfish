@@ -142,6 +142,14 @@ impl BmcQuirks {
         matches!(self.platform, Some(Platform::AmiViking | Platform::LenovoAmi))
     }
 
+    /// Missing Id property in Chassis resource. Required by spec, but the
+    /// GB300 AMI "AMI Redfish Server" (LenovoAmi) chassis collection members
+    /// omit it. Defaulted from the trailing segment of @odata.id.
+    #[cfg(feature = "chassis")]
+    pub(crate) fn bug_missing_chassis_id_field(&self) -> bool {
+        matches!(self.platform, Some(Platform::LenovoAmi))
+    }
+
     /// NVIDIA DPU sometimes returns empty string UUID in
     /// chassis/computer system payloads when DPU is in NIC mode.
     #[cfg(any(feature = "chassis", feature = "computer-systems"))]
