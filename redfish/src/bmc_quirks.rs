@@ -150,6 +150,26 @@ impl BmcQuirks {
         matches!(self.platform, Some(Platform::LenovoAmi))
     }
 
+    /// Missing `Id` property on Redfish *collection* resources. Per the
+    /// Redfish spec, collection resources (e.g. `ChassisCollection`,
+    /// `ManagerCollection`, `SoftwareInventoryCollection`, ...) are NOT
+    /// required to carry an `Id`, yet the generated `ResourceCollection`
+    /// type marks it required. The GB300 AMI "AMI Redfish Server"
+    /// (LenovoAmi) omits `Id` on *every* collection it returns (verified on
+    /// /Systems, /Managers, /Chassis, /UpdateService/FirmwareInventory,
+    /// /UpdateService/SoftwareInventory, /AccountService/Accounts and the
+    /// System/Manager sub-collections Processors/Memory/Storage/
+    /// EthernetInterfaces), which aborts discovery with `missing field Id`.
+    ///
+    /// When set, the collection wrapper JSON is patched on read to inject a
+    /// default `Id` (derived from the trailing segment of `@odata.id`,
+    /// mirroring `add_default_chassis_id`) before deserialization. Gated to
+    /// LenovoAmi so other platforms are unaffected.
+    #[cfg(feature = "patch-collection")]
+    pub(crate) fn bug_missing_collection_id(&self) -> bool {
+        matches!(self.platform, Some(Platform::LenovoAmi))
+    }
+
     /// NVIDIA DPU sometimes returns empty string UUID in
     /// chassis/computer system payloads when DPU is in NIC mode.
     #[cfg(any(feature = "chassis", feature = "computer-systems"))]

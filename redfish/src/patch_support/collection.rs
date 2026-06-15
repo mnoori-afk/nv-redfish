@@ -58,12 +58,27 @@ where
         patch_fn: Option<&ReadPatchFn>,
         filter_fn: Option<&FilterFn>,
     ) -> Result<Arc<T>, Error<B>> {
-        if patch_fn.is_some() || filter_fn.is_some() {
+        // Some BMCs omit the (spec-optional) `Id` on collection wrappers,
+        // which the generated `ResourceCollection` marks required. When the
+        // quirk is active we must patch the *wrapper* JSON (not just the
+        // members), so route through the patched branch unconditionally.
+        let patch_wrapper_id = bmc.quirks.bug_missing_collection_id();
+        if patch_fn.is_some() || filter_fn.is_some() || patch_wrapper_id {
             // Patches are not free so we keep separate branch for
             // patched collections only having this cost on systems
             // that requires to pay the price.
-            let patched_collection_ref = NavProperty::<Collection>::new_reference(nav.id().clone());
-            let collection = bmc.expand_property(&patched_collection_ref).await?;
+            let collection = if patch_wrapper_id {
+                // Expand the wrapper as raw JSON, inject a default `Id`
+                // derived from `@odata.id`, then deserialize to `Collection`.
+                let raw_ref = NavProperty::<RawCollection>::new_reference(nav.id().clone());
+                let raw = bmc.expand_property(&raw_ref).await?;
+                let patched = add_default_collection_id(raw.0.clone());
+                Arc::new(serde_json::from_value::<Collection>(patched).map_err(Error::Json)?)
+            } else {
+                let patched_collection_ref =
+                    NavProperty::<Collection>::new_reference(nav.id().clone());
+                bmc.expand_property(&patched_collection_ref).await?
+            };
             let patch_fn = patch_fn.map(AsRef::as_ref);
             let filter_fn = filter_fn.map(AsRef::as_ref);
             let members = collection.members(patch_fn, filter_fn)?;
@@ -196,6 +211,59 @@ impl EntityTypeRef for Collection {
 }
 
 impl Expandable for Collection {}
+
+/// Raw collection wrapper used when a BMC omits the (spec-optional) `Id`
+/// on collection resources. Deserializes the whole `$expand`ed collection
+/// payload to untyped JSON so the wrapper can be patched (an `Id` injected)
+/// before being parsed into [`Collection`]. Unlike `Payload`, this type is
+/// `Expandable`, so it preserves the `$expand` used to materialize members.
+struct RawCollection(JsonValue);
+
+impl<'de> Deserialize<'de> for RawCollection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        JsonValue::deserialize(deserializer).map(RawCollection)
+    }
+}
+
+impl EntityTypeRef for RawCollection {
+    fn odata_id(&self) -> &ODataId {
+        // Only the trailing `@odata.id` segment matters for the patch, and
+        // expansion is driven by the reference id supplied by the caller, so
+        // this accessor is never used to drive a request. Return an empty id.
+        static EMPTY: std::sync::OnceLock<ODataId> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(|| String::new().into())
+    }
+    fn etag(&self) -> Option<&ODataETag> {
+        None
+    }
+}
+
+impl Expandable for RawCollection {}
+
+/// Inject a default `Id` into a collection wrapper object that omits it.
+/// The value is derived from the trailing segment of `@odata.id`
+/// (e.g. `.../UpdateService/FirmwareInventory` -> `FirmwareInventory`),
+/// mirroring `add_default_chassis_id`. Member payloads are left untouched.
+fn add_default_collection_id(v: JsonValue) -> JsonValue {
+    if let JsonValue::Object(mut obj) = v {
+        if !obj.contains_key("Id") {
+            let id = obj
+                .get("@odata.id")
+                .and_then(JsonValue::as_str)
+                .and_then(|s| s.trim_end_matches('/').rsplit('/').next())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Collection")
+                .to_string();
+            obj.insert("Id".to_string(), JsonValue::String(id));
+        }
+        JsonValue::Object(obj)
+    } else {
+        v
+    }
+}
 
 // Helper struct that enables creating a new member of the collection
 // and applying a patch to the payload before creation.
