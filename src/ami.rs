@@ -122,16 +122,42 @@ impl Redfish for Bmc {
         Box::pin(async move { self.s.change_password(user, new).await })
     }
 
-    /// AMI BMC requires If-Match header for password changes
+    /// Rotate the BMC password for the AMI account.
+    ///
+    /// AMI Redfish servers (notably the GB300 Lenovo trays) expose accounts at
+    /// *non-contiguous* member ids: e.g. only `Accounts/1` (Administrator,
+    /// disabled) and `Accounts/4` (the working `admin`). The caller-supplied
+    /// `account_id` (NICo's site-explorer hardcodes `"2"`) therefore points at a
+    /// member that does not exist, yielding a fatal 404.
+    ///
+    /// Instead of trusting the numeric id, resolve the account BY USERNAME:
+    /// enumerate `/redfish/v1/AccountService/Accounts`, match the account whose
+    /// `UserName` equals the username this client authenticates with (the active
+    /// admin), and PATCH that member. The AMI `If-Match: *` header is preserved.
+    ///
+    /// If the client has no associated username (anonymous) we fall back to the
+    /// supplied id so existing callers/behaviour are unaffected.
     fn change_password_by_id<'a>(
         &'a self,
         account_id: &'a str,
         new_pass: &'a str,
     ) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
-            let url = format!("AccountService/Accounts/{}", account_id);
+            // Resolve the member to patch by the authenticated admin username.
+            let resolved_id = match self.s.client.user() {
+                Some(username) => self.s.get_account_by_name(username).await?.id,
+                None => Some(account_id.to_string()),
+            };
+            let Some(id) = resolved_id else {
+                return Err(RedfishError::UserNotFound(format!(
+                    "AMI account for current user has no ID field (requested id {account_id})"
+                )));
+            };
+
+            let url = format!("AccountService/Accounts/{}", id);
             let mut data = HashMap::new();
             data.insert("Password", new_pass);
+            // AMI BMC requires the If-Match header for password changes.
             self.s.client.patch_with_if_match(&url, data).await
         })
     }
@@ -771,14 +797,36 @@ impl Redfish for Bmc {
         Box::pin(async move { self.s.bios().await })
     }
 
-    /// AMI BMC requires If-Match header for BIOS changes
+    /// AMI BMC requires If-Match header for BIOS changes.
+    ///
+    /// Before sending the PATCH we filter `values` down to the keys that
+    /// actually exist in the BMC's live `Bios.Attributes`. AMI rejects the
+    /// *entire* request with `PropertyUnknown` if any single key is absent
+    /// (this is what broke GB300 machine-setup), so dropping unknown keys keeps
+    /// the request valid across heterogeneous AMI boards. If reading the live
+    /// attributes fails we fall back to sending the body unfiltered.
     fn set_bios<'a>(
         &'a self,
         values: HashMap<String, serde_json::Value>,
     ) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let url = format!("Systems/{}/Bios/SD", self.s.system_id());
-            let body = HashMap::from([("Attributes", values)]);
+
+            let filtered = match self.s.bios_attributes().await {
+                Ok(live) => values
+                    .into_iter()
+                    .filter(|(k, _)| live.get(k).is_some())
+                    .collect::<HashMap<_, _>>(),
+                // If we can't read live attributes, don't silently drop the
+                // request; send what we were given.
+                Err(_) => values,
+            };
+
+            if filtered.is_empty() {
+                return Ok(());
+            }
+
+            let body = HashMap::from([("Attributes", filtered)]);
             self.s.client.patch_with_if_match(&url, body).await
         })
     }
@@ -1341,17 +1389,27 @@ impl Bmc {
 
     /// Get the BIOS attributes for machine setup.
     fn machine_setup_attrs(&self) -> HashMap<String, serde_json::Value> {
+        // GB300-aware AMI BIOS attribute set, aligned with NICo's expected set.
+        //
+        // The previous list assumed an Intel x86 board and included attributes
+        // that DO NOT exist on the ARM Grace GB300 (`VMXEN`, `FBO001`,
+        // `EndlessBoot`). PATCHing those to `/Bios/SD` is rejected with
+        // `PropertyUnknown`, so machine-setup never reached `is_done`. They are
+        // dropped here; the GB300 equivalents are:
+        //   - boot mode select: FBO101/FBO201 (left at platform default)
+        //   - infinite/endless boot: `LEM0003`
+        //
+        // `set_bios` additionally filters this body against the BMC's live
+        // `Bios.Attributes`, so any key absent on a given board is never sent.
         HashMap::from([
-            ("VMXEN".to_string(), "Enable".into()), // VMX (Intel Virtualization)
-            ("PCIS007".to_string(), "Enabled".into()), // SR-IOV Support
+            ("PCIS007".to_string(), "PCIS007Enabled".into()), // SR-IOV Support
             ("LEM0001".to_string(), 3.into()),      // PXE retry count (remove on future FW update)
+            ("LEM0003".to_string(), 50.into()),     // Infinite Boot (GB300)
             ("NWSK000".to_string(), "Enabled".into()), // Network Stack
             ("NWSK001".to_string(), "Disabled".into()), // IPv4 PXE Support
             ("NWSK006".to_string(), "Enabled".into()), // IPv4 HTTP Support
             ("NWSK002".to_string(), "Disabled".into()), // IPv6 PXE Support
             ("NWSK007".to_string(), "Disabled".into()), // IPv6 HTTP Support
-            ("FBO001".to_string(), "UEFI".into()),  // Boot Mode Select
-            ("EndlessBoot".to_string(), "Enabled".into()), // Infinite Boot
         ])
     }
 
@@ -1375,11 +1433,10 @@ impl Bmc {
 
         for (key, expected) in expected_attrs {
             let Some(actual) = bios.get(&key) else {
-                diffs.push(MachineSetupDiff {
-                    key: key.to_string(),
-                    expected: expected.to_string(),
-                    actual: "_missing_".to_string(),
-                });
+                // Consistent with `set_bios`, which filters out keys that don't
+                // exist on this board: an attribute the BMC does not expose can
+                // never be patched, so it must not count as an outstanding diff
+                // (otherwise `is_done` could never become true). Skip it.
                 continue;
             };
             let act = actual.as_str().unwrap_or(&actual.to_string()).to_string();

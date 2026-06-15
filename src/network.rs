@@ -301,6 +301,11 @@ impl RedfishHttpClient {
         &self.endpoint.host
     }
 
+    /// Returns the username this client authenticates with, if any.
+    pub fn user(&self) -> Option<&str> {
+        self.endpoint.user.as_deref()
+    }
+
     pub async fn get<T>(&self, api: &str) -> Result<(StatusCode, T), RedfishError>
     where
         T: DeserializeOwned + ::std::fmt::Debug,
