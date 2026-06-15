@@ -32,6 +32,12 @@ enum Platform {
     Hpe,
     Dell,
     AmiViking,
+    // Lenovo-vendor BMC fronting an AMI MegaRAC tray (e.g. GB300 NVL72 compute tray).
+    // Reports ServiceRoot Vendor="Lenovo" (its AMI-ness is only in the Oem block), so it
+    // does not match the AmiViking arm. Needs the same missing-ChassisType / missing-Name
+    // chassis patches, but NOT the Viking systems/managers odata filters (those would drop
+    // the Lenovo host's System/Manager members), hence a distinct platform.
+    LenovoAmi,
     Nvidia,
     NvidiaDpu,
     Anonymous1_9_0,
@@ -51,6 +57,10 @@ impl BmcQuirks {
             Some("NVIDIA") => Some(Platform::Nvidia),
             Some("Nvidia") if product_str == Some("Nvidia-BMCMezz") => Some(Platform::NvidiaDpu),
             None if redfish_version_str == Some("1.9.0") => Some(Platform::Anonymous1_9_0),
+            // Lenovo-vendor AMI tray BMC (GB300 NVL72 compute tray). Only enables the
+            // missing-ChassisType / missing-Name chassis defaults below (both no-op when the
+            // field is present), so matching all Lenovo roots here is safe.
+            Some("Lenovo") => Some(Platform::LenovoAmi),
             _ => None,
         };
         Self { platform }
@@ -118,14 +128,14 @@ impl BmcQuirks {
     /// systems doesn't provide it.
     #[cfg(feature = "chassis")]
     pub(crate) fn bug_missing_chassis_type_field(&self) -> bool {
-        self.platform == Some(Platform::AmiViking)
+        matches!(self.platform, Some(Platform::AmiViking | Platform::LenovoAmi))
     }
 
     /// Missing Name property in Chassis resource. This property is
     /// required in any resource.
     #[cfg(feature = "chassis")]
     pub(crate) fn bug_missing_chassis_name_field(&self) -> bool {
-        self.platform == Some(Platform::AmiViking)
+        matches!(self.platform, Some(Platform::AmiViking | Platform::LenovoAmi))
     }
 
     /// NVIDIA DPU sometimes returns empty string UUID in
