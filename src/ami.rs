@@ -1376,13 +1376,25 @@ impl Bmc {
         let mac = boot_interface_mac.to_uppercase();
         let (system, all_boot_options) = self.get_system_and_boot_options().await?;
 
-        let expected_first_boot_option = all_boot_options
-            .iter()
-            .find(|opt| {
-                let display = opt.display_name.to_uppercase();
-                display.contains("HTTP") && display.contains("IPV4") && display.contains(&mac)
-            })
-            .map(|opt| opt.display_name.clone());
+        // Prefer an HTTP IPv4 boot entry for the target interface. Some boards
+        // (e.g. GB300 Lenovo/AMI trays) expose NO HTTP boot option at all —
+        // only PXE IPv4/IPv6 + an HDD entry — so an HTTP-only match never
+        // resolves, `expected` stays `None`, and machine-setup's `boot_first`
+        // diff is never satisfied (`is_done` never becomes true). When no
+        // HTTP+IPv4 entry exists, fall back to the PXE IPv4 entry for the same
+        // interface. Boot options list verified against the live BMC.
+        let find_for = |needle: &str| {
+            all_boot_options
+                .iter()
+                .find(|opt| {
+                    let display = opt.display_name.to_uppercase();
+                    display.contains(needle)
+                        && display.contains("IPV4")
+                        && display.contains(&mac)
+                })
+                .map(|opt| opt.display_name.clone())
+        };
+        let expected_first_boot_option = find_for("HTTP").or_else(|| find_for("PXE"));
 
         let actual_first_boot_option = system.boot.boot_order.first().and_then(|first_ref| {
             all_boot_options
