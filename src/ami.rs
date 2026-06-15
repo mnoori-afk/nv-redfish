@@ -551,16 +551,46 @@ impl Redfish for Bmc {
         Box::pin(async move {
             use serde_json::Value;
 
-            let attributes: HashMap<String, Value> = HashMap::from([
-                ("TER001".to_string(), "Enabled".into()), // Console Redirection
-                ("TER010".to_string(), "Enabled".into()), // Console Redirection EMS
-                ("TER06B".to_string(), "COM1".into()),    // Out-of-Band Mgmt Port
-                ("TER0021".to_string(), "115200".into()), // Bits per second
-                ("TER0020".to_string(), "115200".into()), // Bits per second EMS
-                ("TER012".to_string(), "VT100Plus".into()), // Terminal Type
-                ("TER011".to_string(), "VT-UTF8".into()), // Terminal Type EMS
-                ("TER05D".to_string(), "None".into()),    // Flow Control
-            ]);
+            // GB300 Lenovo/AMI trays namespace the serial-console enum values:
+            // the BMC only accepts `{AttributeName}{ValueName}` (e.g.
+            // `TER06BCOM0`, `TER0021115200`) and rejects the bare forms
+            // (`COM1`, `115200`, `VT100Plus`, `VT-UTF8`, `None`) with
+            // `PropertyValueNotInList`. Since `machine_setup` PATCHes these
+            // first, that rejection makes the whole `set_bios` call fail and
+            // `is_bios_setup` never converges. Verified against the live
+            // `BiosAttributeRegistry9ABDA.1.3.0` allowable lists:
+            //   TER06B -> [TER06BCOM0]
+            //   TER0021 -> [..., TER0021115200, ...]
+            //   TER0020 -> [..., TER0020115200, ...]
+            //   TER012 -> [TER012VT100, TER012VT100Plus, TER012VTUTF8, TER012ANSI]
+            //   TER011 -> [TER011VT100, TER011VT100Plus, TER011VTUTF8, TER011ANSI]
+            //   TER05D -> [TER05DNone, TER05DHardwareRTSCTS]
+            // (TER001/TER010 use the plain Enabled/Disabled vocab on both.)
+            // Other AMI boards (e.g. Viking DGX H100) keep the bare values.
+            let attributes: HashMap<String, Value> =
+                if self.s.vendor == Some(RedfishVendor::LenovoAMI) {
+                    HashMap::from([
+                        ("TER001".to_string(), "Enabled".into()), // Console Redirection
+                        ("TER010".to_string(), "Enabled".into()), // Console Redirection EMS
+                        ("TER06B".to_string(), "TER06BCOM0".into()), // Out-of-Band Mgmt Port
+                        ("TER0021".to_string(), "TER0021115200".into()), // Bits per second
+                        ("TER0020".to_string(), "TER0020115200".into()), // Bits per second EMS
+                        ("TER012".to_string(), "TER012VT100Plus".into()), // Terminal Type
+                        ("TER011".to_string(), "TER011VTUTF8".into()), // Terminal Type EMS
+                        ("TER05D".to_string(), "TER05DNone".into()), // Flow Control
+                    ])
+                } else {
+                    HashMap::from([
+                        ("TER001".to_string(), "Enabled".into()), // Console Redirection
+                        ("TER010".to_string(), "Enabled".into()), // Console Redirection EMS
+                        ("TER06B".to_string(), "COM1".into()),    // Out-of-Band Mgmt Port
+                        ("TER0021".to_string(), "115200".into()), // Bits per second
+                        ("TER0020".to_string(), "115200".into()), // Bits per second EMS
+                        ("TER012".to_string(), "VT100Plus".into()), // Terminal Type
+                        ("TER011".to_string(), "VT-UTF8".into()), // Terminal Type EMS
+                        ("TER05D".to_string(), "None".into()),    // Flow Control
+                    ])
+                };
 
             self.set_bios(attributes).await
         })
@@ -575,16 +605,34 @@ impl Redfish for Bmc {
             let url = format!("Systems/{}/Bios", self.s.system_id());
             let attrs = jsonmap::get_object(&bios, "Attributes", &url)?;
 
-            let expected = vec![
-                ("TER001", "Enabled", "Disabled"),
-                ("TER010", "Enabled", "Disabled"),
-                ("TER06B", "COM1", "any"),
-                ("TER0021", "115200", "any"),
-                ("TER0020", "115200", "any"),
-                ("TER012", "VT100Plus", "any"),
-                ("TER011", "VT-UTF8", "any"),
-                ("TER05D", "None", "any"),
-            ];
+            // GB300 Lenovo/AMI trays namespace the serial-console enum values
+            // (see `setup_serial_console`); the status check must compare
+            // against the same namespaced forms or it never converges and
+            // `is_bios_setup` returns false forever. Other AMI boards keep the
+            // bare values.
+            let expected = if self.s.vendor == Some(RedfishVendor::LenovoAMI) {
+                vec![
+                    ("TER001", "Enabled", "Disabled"),
+                    ("TER010", "Enabled", "Disabled"),
+                    ("TER06B", "TER06BCOM0", "any"),
+                    ("TER0021", "TER0021115200", "any"),
+                    ("TER0020", "TER0020115200", "any"),
+                    ("TER012", "TER012VT100Plus", "any"),
+                    ("TER011", "TER011VTUTF8", "any"),
+                    ("TER05D", "TER05DNone", "any"),
+                ]
+            } else {
+                vec![
+                    ("TER001", "Enabled", "Disabled"),
+                    ("TER010", "Enabled", "Disabled"),
+                    ("TER06B", "COM1", "any"),
+                    ("TER0021", "115200", "any"),
+                    ("TER0020", "115200", "any"),
+                    ("TER012", "VT100Plus", "any"),
+                    ("TER011", "VT-UTF8", "any"),
+                    ("TER05D", "None", "any"),
+                ]
+            };
 
             let mut message = String::new();
             let mut enabled = true;
