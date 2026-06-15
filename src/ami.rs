@@ -698,8 +698,15 @@ impl Redfish for Bmc {
 
     fn clear_tpm<'a>(&'a self) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
-            self.set_bios(HashMap::from([("TCG006".to_string(), "TPM Clear".into())]))
-                .await
+            // GB300 AMI uses the namespaced enum `TCG006TPMClear` (the registry
+            // allows only `TCG006None` / `TCG006TPMClear`); the free-text
+            // `"TPM Clear"` is rejected. Value confirmed against the live
+            // BiosAttributeRegistry9ABDA.1.3.0 TCG006 entry.
+            self.set_bios(HashMap::from([(
+                "TCG006".to_string(),
+                "TCG006TPMClear".into(),
+            )]))
+            .await
         })
     }
 
@@ -1402,14 +1409,22 @@ impl Bmc {
         // `set_bios` additionally filters this body against the BMC's live
         // `Bios.Attributes`, so any key absent on a given board is never sent.
         HashMap::from([
+            // GB300 AMI enumeration attributes use namespaced ValueNames: the
+            // accepted value is `{AttributeName}{ValueName}` (e.g.
+            // `NWSK001Disabled`, not `Disabled`), confirmed against the live
+            // BiosAttributeRegistry and the board's current `/Bios` values.
+            // Sending the bare `Enabled`/`Disabled` form is rejected, so the
+            // attribute never converges and machine-setup never reaches
+            // `is_done`. (`PCIS007` was already correct; the NWSK keys are
+            // fixed here to match.)
             ("PCIS007".to_string(), "PCIS007Enabled".into()), // SR-IOV Support
             ("LEM0001".to_string(), 3.into()),      // PXE retry count (remove on future FW update)
             ("LEM0003".to_string(), 50.into()),     // Infinite Boot (GB300)
-            ("NWSK000".to_string(), "Enabled".into()), // Network Stack
-            ("NWSK001".to_string(), "Disabled".into()), // IPv4 PXE Support
-            ("NWSK006".to_string(), "Enabled".into()), // IPv4 HTTP Support
-            ("NWSK002".to_string(), "Disabled".into()), // IPv6 PXE Support
-            ("NWSK007".to_string(), "Disabled".into()), // IPv6 HTTP Support
+            ("NWSK000".to_string(), "NWSK000Enabled".into()), // Network Stack
+            ("NWSK001".to_string(), "NWSK001Disabled".into()), // IPv4 PXE Support
+            ("NWSK006".to_string(), "NWSK006Enabled".into()), // IPv4 HTTP Support
+            ("NWSK002".to_string(), "NWSK002Disabled".into()), // IPv6 PXE Support
+            ("NWSK007".to_string(), "NWSK007Disabled".into()), // IPv6 HTTP Support
         ])
     }
 
