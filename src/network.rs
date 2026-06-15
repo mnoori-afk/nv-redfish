@@ -221,11 +221,48 @@ impl RedfishClientPool {
         // system id and set it before set_vendor (DGX detection depends on it).
         if vendor != RedfishVendor::DeltaPowerShelf {
             let systems = s.get_systems().await?;
-            let system_id = systems.first().ok_or_else(|| RedfishError::GenericError {
+            let first_system = systems.first().ok_or_else(|| RedfishError::GenericError {
                 error: "No systems found in service root".to_string(),
             })?;
+
+            // AMI-based GB300 trays (Lenovo/AMI) expose two ComputerSystems:
+            // the GPU baseboard (`HGX_Baseboard_0`, no `/Bios`) and the host
+            // (`System_0`, has `/Bios`). The collection lists the baseboard
+            // first, so a naive `first()` picks a system with no `/Bios`,
+            // `/SecureBoot`, lockdown, etc., and every host-setup call 404s.
+            //
+            // Mirror nv-redfish: for AMI vendors, select the host system that
+            // actually exposes a `/Bios` resource. Probe each candidate's
+            // `/Bios` (a 404 returns an error we treat as "not the host"), and
+            // fall back to skipping `HGX_`-prefixed ids, then to `first()`.
+            let system_id = if matches!(vendor, RedfishVendor::AMI | RedfishVendor::LenovoAMI)
+                && systems.len() > 1
+            {
+                let mut host = None;
+                for candidate in &systems {
+                    let bios_url = format!("Systems/{candidate}/Bios");
+                    if s.client
+                        .get::<serde_json::Value>(&bios_url)
+                        .await
+                        .is_ok()
+                    {
+                        host = Some(candidate.clone());
+                        break;
+                    }
+                }
+                host
+                    .or_else(|| {
+                        systems
+                            .iter()
+                            .find(|id| !id.starts_with("HGX_"))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| first_system.clone())
+            } else {
+                first_system.clone()
+            };
             // call set_system_id always before calling set_vendor
-            s.set_system_id(system_id)?;
+            s.set_system_id(&system_id)?;
         }
 
         s.set_manager_id(manager_id)?;
