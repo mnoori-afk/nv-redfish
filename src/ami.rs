@@ -1097,10 +1097,25 @@ impl Redfish for Bmc {
                 .to_uppercase();
             let (system, all_boot_options) = self.get_system_and_boot_options().await?;
 
-            let target = all_boot_options.iter().find(|opt| {
-                let display = opt.display_name.to_uppercase();
-                display.contains("HTTP") && display.contains("IPV4") && display.contains(&mac)
-            });
+            // Prefer an HTTP IPv4 boot entry for the target interface, but fall
+            // back to the PXE IPv4 entry when the board exposes no HTTP boot
+            // option at all (GB300 Lenovo/AMI trays have 0 HTTP options — only
+            // PXE IPv4/IPv6 + an HDD entry, verified against the live BMC). This
+            // mirrors the fallback already in
+            // `get_expected_and_actual_first_boot_option` (the verify helper);
+            // without it `set_boot_order_dpu_first` returns
+            // `MissingBootOption`, which `handle_no_dpu_error` does not swallow,
+            // so SetBootOrder soft-loops forever. HTTP stays preferred, so
+            // boards that do expose HTTP options are unaffected.
+            let find_for = |needle: &str| {
+                all_boot_options.iter().find(|opt| {
+                    let display = opt.display_name.to_uppercase();
+                    display.contains(needle)
+                        && display.contains("IPV4")
+                        && display.contains(&mac)
+                })
+            };
+            let target = find_for("HTTP").or_else(|| find_for("PXE"));
 
             let Some(target) = target else {
                 let all_names: Vec<_> = all_boot_options
@@ -1108,7 +1123,7 @@ impl Redfish for Bmc {
                     .map(|b| format!("{}: {}", b.id, b.display_name))
                     .collect();
                 return Err(RedfishError::MissingBootOption(format!(
-                    "No HTTP IPv4 boot option found for MAC {mac}; available: {:#?}",
+                    "No HTTP/PXE IPv4 boot option found for MAC {mac}; available: {:#?}",
                     all_names
                 )));
             };
