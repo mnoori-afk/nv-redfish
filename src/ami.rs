@@ -568,7 +568,15 @@ impl Redfish for Bmc {
             // (TER001/TER010 use the plain Enabled/Disabled vocab on both.)
             // Other AMI boards (e.g. Viking DGX H100) keep the bare values.
             let attributes: HashMap<String, Value> =
-                if self.s.vendor == Some(RedfishVendor::LenovoAMI) {
+                // GB300 Lenovo trays classify as plain AMI (ServiceRoot Vendor="AMI",
+                // not "lenovo"), so include AMI here — not just LenovoAMI — or the
+                // namespaced TER* values never get sent and machine_setup loops on
+                // PropertyValueNotInList. (This fork only serves the launchpad GB300
+                // fleet; no bare-value Viking AMI boards are present here.)
+                if matches!(
+                    self.s.vendor,
+                    Some(RedfishVendor::LenovoAMI | RedfishVendor::AMI)
+                ) {
                     HashMap::from([
                         ("TER001".to_string(), "Enabled".into()), // Console Redirection
                         ("TER010".to_string(), "Enabled".into()), // Console Redirection EMS
@@ -610,7 +618,10 @@ impl Redfish for Bmc {
             // against the same namespaced forms or it never converges and
             // `is_bios_setup` returns false forever. Other AMI boards keep the
             // bare values.
-            let expected = if self.s.vendor == Some(RedfishVendor::LenovoAMI) {
+            let expected = if matches!(
+                self.s.vendor,
+                Some(RedfishVendor::LenovoAMI | RedfishVendor::AMI)
+            ) {
                 vec![
                     ("TER001", "Enabled", "Disabled"),
                     ("TER010", "Enabled", "Disabled"),
