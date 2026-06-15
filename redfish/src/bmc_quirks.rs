@@ -32,11 +32,12 @@ enum Platform {
     Hpe,
     Dell,
     AmiViking,
-    // Lenovo-vendor BMC fronting an AMI MegaRAC tray (e.g. GB300 NVL72 compute tray).
-    // Reports ServiceRoot Vendor="Lenovo" (its AMI-ness is only in the Oem block), so it
-    // does not match the AmiViking arm. Needs the same missing-ChassisType / missing-Name
-    // chassis patches, but NOT the Viking systems/managers odata filters (those would drop
-    // the Lenovo host's System/Manager members), hence a distinct platform.
+    // Newer AMI MegaRAC "AMI Redfish Server" (ServiceRoot Vendor="AMI",
+    // RedfishVersion="1.21.1") as shipped on GB300 NVL72 Lenovo compute-tray BMCs.
+    // The existing AmiViking arm only matches AMI 1.11.0, so this fell through to
+    // Platform=None and the missing-ChassisType/Name chassis patches never applied.
+    // Distinct from AmiViking so it enables ONLY the chassis defaults, NOT the Viking
+    // systems/managers odata filters (which would drop the GB300 host's System/Manager).
     LenovoAmi,
     Nvidia,
     NvidiaDpu,
@@ -57,10 +58,13 @@ impl BmcQuirks {
             Some("NVIDIA") => Some(Platform::Nvidia),
             Some("Nvidia") if product_str == Some("Nvidia-BMCMezz") => Some(Platform::NvidiaDpu),
             None if redfish_version_str == Some("1.9.0") => Some(Platform::Anonymous1_9_0),
-            // Lenovo-vendor AMI tray BMC (GB300 NVL72 compute tray). Only enables the
-            // missing-ChassisType / missing-Name chassis defaults below (both no-op when the
-            // field is present), so matching all Lenovo roots here is safe.
-            Some("Lenovo") => Some(Platform::LenovoAmi),
+            // AMI MegaRAC "AMI Redfish Server" newer than the Viking line (RedfishVersion
+            // 1.21.1 on GB300 NVL72 Lenovo compute-tray BMCs; Viking above is 1.11.0). Same
+            // missing-ChassisType / missing-Name chassis omissions, but it should NOT inherit
+            // the Viking systems/managers odata filters (those drop the GB300 host's
+            // System/Manager members) — hence its own platform that enables only the chassis
+            // defaults below (both no-op when the field is present). Matches any non-Viking AMI.
+            Some("AMI") => Some(Platform::LenovoAmi),
             _ => None,
         };
         Self { platform }
