@@ -165,9 +165,21 @@ impl BmcQuirks {
     /// default `Id` (derived from the trailing segment of `@odata.id`,
     /// mirroring `add_default_chassis_id`) before deserialization. Gated to
     /// LenovoAmi so other platforms are unaffected.
+    ///
+    /// LAUNCHPAD STOPGAP: fire unconditionally rather than only for
+    /// `Platform::LenovoAmi`. On the GB300 launchpad rack the LenovoAmi
+    /// classification is (for a still-unconfirmed runtime reason) not being
+    /// applied even though the BMC reports `Vendor:"AMI"`, so the gated check
+    /// never fired and `/Systems` aborted with `missing field Id`. The patch
+    /// (`add_default_collection_id`) is a strict no-op when `Id` is already
+    /// present, so applying it to every collection is safe for all platforms;
+    /// the only cost is an extra raw expand on collections that supply `Id`.
+    /// Revert to the platform-gated form once nv-redfish ships the canonical
+    /// fix for this model.
     #[cfg(feature = "patch-collection")]
     pub(crate) fn bug_missing_collection_id(&self) -> bool {
-        matches!(self.platform, Some(Platform::LenovoAmi))
+        let _ = &self.platform;
+        true
     }
 
     /// NVIDIA DPU sometimes returns empty string UUID in
