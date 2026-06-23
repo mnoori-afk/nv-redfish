@@ -257,7 +257,19 @@ impl BmcQuirks {
     /// In some cases we expand is not working according to spec,
     /// if it is the case for specific chassis, we would disable
     /// expand api
+    ///
+    /// LAUNCHPAD STOPGAP: disable $expand unconditionally. The GB300 AMI/Lenovo
+    /// BMCs return `$expand`-inlined sub-collections (Processors/Memory/Storage/
+    /// EthernetInterfaces) that omit the required `Id`, so /Systems deserialization
+    /// aborts with `missing field Id` even though the collection *wrapper* Id is
+    /// patched (bug_missing_collection_id). Disabling $expand makes /Systems return
+    /// members as references (fetched individually, where they DO carry Id), which
+    /// avoids the nested missing-Id entirely. Done unconditionally to sidestep the
+    /// runtime platform-classification question; the cost is extra per-resource
+    /// round-trips. Revert to the AmiViking gate once the canonical nv-redfish fix
+    /// for this model lands.
     pub(crate) fn expand_is_not_working_properly(&self) -> bool {
-        self.platform == Some(Platform::AmiViking)
+        let _ = &self.platform;
+        true
     }
 }
