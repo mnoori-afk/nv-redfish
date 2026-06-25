@@ -715,8 +715,31 @@ impl Redfish for Bmc {
     ) -> crate::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let body = HashMap::from([("Boot", HashMap::from([("BootOrder", boot_array)]))]);
-            let url = format!("Systems/{}/SD", self.s.system_id());
-            self.s.client.patch_with_if_match(&url, body).await
+            // Write BootOrder to the pending-settings object the BMC actually
+            // advertises via the system's `@Redfish.Settings`, instead of
+            // assuming the AMI/Viking `Systems/{id}/SD` path. On a regular AMI
+            // BMC `@Redfish.Settings` already resolves to `.../SD`, so this is a
+            // no-op there; but LenovoGB300 (Grace BIOS) advertises a different
+            // settings object, and PATCHing BootOrder to the hardcoded `/SD`
+            // path is silently accepted and never applied -- so the boot order
+            // never changes across reboots and `is_boot_order_setup` stays
+            // false. Fall back to `/SD` when no settings object is advertised.
+            let settings_path = self
+                .get_system()
+                .await?
+                .redfish_settings
+                .and_then(|s| s.settings_object)
+                .map(|o| {
+                    o.odata_id
+                        .trim_start_matches("/redfish/v1/")
+                        .trim_start_matches('/')
+                        .to_string()
+                })
+                .unwrap_or_else(|| format!("Systems/{}/SD", self.s.system_id()));
+            self.s
+                .client
+                .patch_with_if_match(&settings_path, body)
+                .await
         })
     }
 
@@ -1042,10 +1065,20 @@ impl Redfish for Bmc {
                 .to_uppercase();
             let (system, all_boot_options) = self.get_system_and_boot_options().await?;
 
-            let target = all_boot_options.iter().find(|opt| {
-                let display = opt.display_name.to_uppercase();
-                display.contains("HTTP") && display.contains("IPV4") && display.contains(&mac)
-            });
+            // Prefer an HTTP IPv4 boot entry for the target interface, but fall
+            // back to the PXE IPv4 entry when the board exposes no HTTP boot
+            // option at all (some GB300 Lenovo/AMI tray firmwares enumerate only
+            // PXE IPv4/IPv6 + an HDD entry). Without the fallback this returns
+            // `MissingBootOption`, which the no-DPU error handler does not
+            // swallow, so SetBootOrder soft-loops forever. HTTP stays preferred,
+            // so boards that do expose HTTP options are unaffected.
+            let find_for = |needle: &str| {
+                all_boot_options.iter().find(|opt| {
+                    let display = opt.display_name.to_uppercase();
+                    display.contains(needle) && display.contains("IPV4") && display.contains(&mac)
+                })
+            };
+            let target = find_for("HTTP").or_else(|| find_for("PXE"));
 
             let Some(target) = target else {
                 let all_names: Vec<_> = all_boot_options
@@ -1053,7 +1086,7 @@ impl Redfish for Bmc {
                     .map(|b| format!("{}: {}", b.id, b.display_name))
                     .collect();
                 return Err(RedfishError::MissingBootOption(format!(
-                    "No HTTP IPv4 boot option found for MAC {mac}; available: {:#?}",
+                    "No HTTP/PXE IPv4 boot option found for MAC {mac}; available: {:#?}",
                     all_names
                 )));
             };
@@ -1411,13 +1444,20 @@ impl Bmc {
         let mac = boot_interface_mac.to_uppercase();
         let (system, all_boot_options) = self.get_system_and_boot_options().await?;
 
-        let expected_first_boot_option = all_boot_options
-            .iter()
-            .find(|opt| {
-                let display = opt.display_name.to_uppercase();
-                display.contains("HTTP") && display.contains("IPV4") && display.contains(&mac)
-            })
-            .map(|opt| opt.display_name.clone());
+        // Prefer HTTP IPv4, fall back to PXE IPv4 -- mirror the same preference
+        // used by `set_boot_order_dpu_first` so the verify side agrees with what
+        // the write side actually placed first (some GB300 tray firmwares expose
+        // only PXE IPv4 boot entries, no HTTP entry).
+        let find_for = |needle: &str| {
+            all_boot_options
+                .iter()
+                .find(|opt| {
+                    let display = opt.display_name.to_uppercase();
+                    display.contains(needle) && display.contains("IPV4") && display.contains(&mac)
+                })
+                .map(|opt| opt.display_name.clone())
+        };
+        let expected_first_boot_option = find_for("HTTP").or_else(|| find_for("PXE"));
 
         let actual_first_boot_option = system.boot.boot_order.first().and_then(|first_ref| {
             all_boot_options
